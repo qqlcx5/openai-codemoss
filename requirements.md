@@ -48,3 +48,24 @@ fetch("https://jiangsu.codemoss.vip/luomacode-api/conversation", {
 
 当 model后缀有加-tmp, completions 接口的参数 assistantId 改成 2 否则 1
 
+---
+
+token 值 qqlcx5 忽略, 不取里面的值
+登录账号获取token, 当token过期时, 发送 重新登录 和 login 和登录调用下面接口
+
+curl 'https://jiangsu.codemoss.vip/luomacode-api/user/login' \
+  -H 'accept: application/json, text/plain, */*' \
+  -H 'accept-language: zh-CN,zh;q=0.9' \
+  -H 'cache-control: no-cache' \
+  -H 'content-type: application/json' \
+  -H 'origin: https://pc.aihao123.cn' \
+  -H 'pragma: no-cache' \
+  -H 'priority: u=1, i' \
+  -H 'sec-ch-ua: "Chromium";v="140", "Not=A?Brand";v="24", "Google Chrome";v="140"' \
+  -H 'sec-ch-ua-mobile: ?0' \
+  -H 'sec-ch-ua-platform: "Windows"' \
+  -H 'sec-fetch-dest: empty' \
+  -H 'sec-fetch-mode: cors' \
+  -H 'sec-fetch-site: cross-site' \
+  -H 'user-agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36' \
+  --data-raw '{"email":"893917884@qq.com","password":"qqlcx5"}'
