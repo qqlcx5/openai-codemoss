@@ -156,6 +156,15 @@ Content-Type: application/json
 ```bash
 LOG_LEVEL=debug npm start
 ```
+--name moss-proxy：给进程起个名字，方便管理。
+--watch：监听文件变化，开发时改完代码会自动重启。
+--ignore-watch="node_modules"：忽略 node_modules 目录，避免无谓重启。
+
+pm2 list          # 查看运行状态
+pm2 logs moss-proxy # 实时日志
+pm2 restart moss-proxy
+pm2 stop moss-proxy
+pm2 delete moss-proxy
 
 ## 许可证
 
