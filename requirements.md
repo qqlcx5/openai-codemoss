@@ -50,8 +50,8 @@ fetch("https://jiangsu.codemoss.vip/luomacode-api/conversation", {
 
 ---
 
-token 值 qqlcx5 忽略, 不取里面的值
-登录账号获取token, 当token过期时, 发送 重新登录 和 login 和登录调用下面接口
+token 值 sk-qqlcx5 忽略不取里面的值, 反之取
+通过下面接口，登录账号获取token, 发送 重新登录 和 login 和 登录 调用下面接口，然后调用新建会话接口
 
 curl 'https://jiangsu.codemoss.vip/luomacode-api/user/login' \
   -H 'accept: application/json, text/plain, */*' \
@@ -69,3 +69,13 @@ curl 'https://jiangsu.codemoss.vip/luomacode-api/user/login' \
   -H 'sec-fetch-site: cross-site' \
   -H 'user-agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36' \
   --data-raw '{"email":"893917884@qq.com","password":"qqlcx5"}'
+2. 修复发送 1 和重置，调用接口，输出，对话，但是要返回提示信息
+3. completion 接口，报错 返回的信息，如下
+{
+  "code": -1,
+  "status": 3,
+  "msg": "该模型暂时下线，请稍后再试",
+  "content": "该模型暂时下线，请稍后再试",
+  "nonce": "hp_678727898",
+  "conversationId": "5364868"
+}
