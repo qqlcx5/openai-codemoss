@@ -305,6 +305,49 @@ const authenticateToken = async (req, res, next) => {
 
 const getVersionFromModel = (model) => model?.includes('-tmp') ? '2' : '1';
 
+/**
+ * 统一发送系统消息（适配流式/非流式）
+ */
+const sendSystemMessage = (res, content, isStream, model, requestId) => {
+  const timestamp = Math.floor(Date.now() / 1000);
+  const id = `chatcmpl-${requestId}`;
+
+  if (isStream) {
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive',
+      'X-Request-ID': requestId
+    });
+    const chunk = {
+      id,
+      object: 'chat.completion.chunk',
+      created: timestamp,
+      model: model,
+      choices: [{
+        index: 0,
+        delta: { role: 'assistant', content },
+        finish_reason: null
+      }]
+    };
+    res.write(`data: ${JSON.stringify(chunk)}\n\n`);
+    res.write('data: [DONE]\n\n');
+    res.end();
+  } else {
+    res.json({
+      id,
+      object: 'chat.completion',
+      created: timestamp,
+      model: model,
+      choices: [{
+        message: { role: 'assistant', content },
+        finish_reason: 'stop',
+        index: 0
+      }]
+    });
+  }
+};
+
 // 创建新会话
 const createNewConversation = async (token, model) => {
   try {
@@ -389,12 +432,12 @@ app.post('/v1/chat/completions', authenticateToken, asyncHandler(async (req, res
 
   // 重新登录逻辑
   if (shouldRelogin(messages) && req.mossToken !== 'sk-qqlcx5') {
-     // ... (非默认key无法自动重登，忽略)
+     return sendSystemMessage(res, "非默认key无法自动重登，请重新登录。" + req.mossToken, stream, model, requestId);
   } else if (shouldRelogin(messages)) {
     userTokenStore.delete('default_user'); // 强制清理缓存
     req.mossToken = await loginAndGetToken();
     userTokenStore.set('default_user', req.mossToken);
-    return res.json({ choices: [{ message: { content: "已重新登录，请重试。" } }] });
+    return sendSystemMessage(res, "已重新登录，请重试。", stream, model, requestId);
   }
 
   // 会话管理
@@ -403,7 +446,7 @@ app.post('/v1/chat/completions', authenticateToken, asyncHandler(async (req, res
     conversationId = await createNewConversation(req.mossToken, model);
     conversationStore.set(userKey, conversationId);
     if (shouldResetConversation(messages)) {
-      return res.json({ choices: [{ message: { content: "会话已重置。" } }] });
+      return sendSystemMessage(res, `会话ID已失效，新的会话 ID: ${conversationId} 已创建 ，请重新提问~~`, stream, model, requestId);
     }
   }
 
@@ -423,7 +466,8 @@ app.post('/v1/chat/completions', authenticateToken, asyncHandler(async (req, res
 
   const response = await fetch(mossRequest.url, {
     method: 'POST',
-    headers: { ...mossRequest.headers, agent: httpsAgent }, // 使用 Agent
+    headers: mossRequest.headers,
+    agent: httpsAgent,
     body: mossRequest.body,
     signal: controller.signal
   });
