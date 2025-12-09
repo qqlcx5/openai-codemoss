@@ -166,6 +166,47 @@ pm2 restart moss-proxy
 pm2 stop moss-proxy
 pm2 delete moss-proxy
 
+## 日志查看
+
+### 快速查看
+
+项目支持多种日志查看方式，详细说明请参考：
+- **[快速日志查看.md](./快速日志查看.md)** - 常用命令速查
+- **[日志查看指南.md](./日志查看指南.md)** - 完整日志查看指南
+
+### 常用命令
+
+```bash
+# PM2方式 - 实时查看日志
+pm2 logs moss-proxy
+
+# 文件日志方式 - 实时查看
+tail -f logs/app.log
+
+# 查看错误日志
+tail -f logs/error.log
+
+# 查看最近100行
+pm2 logs moss-proxy --lines 100
+tail -n 100 logs/app.log
+```
+
+### 日志文件说明
+
+- `logs/app-YYYY-MM-DD.log` - 应用日志（INFO、WARN、ERROR）
+- `logs/error-YYYY-MM-DD.log` - 错误日志（仅ERROR级别）
+- 日志文件自动按天轮转，保留7天
+
+### 使用PM2配置文件启动（推荐）
+
+```bash
+# 使用配置文件启动（包含日志配置）
+npm run pm2:prod
+
+# 查看日志
+npm run pm2:logs
+```
+
 ## 许可证
 
 MIT License
