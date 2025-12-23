@@ -274,13 +274,20 @@ const loginAndGetToken = async () => {
   }
 };
 
-// Token验证中间件
+// Token验证中间件 - OpenAI 兼容错误格式
 const authenticateToken = async (req, res, next) => {
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1];
 
   if (!token) {
-    return res.status(401).json({ error: { message: 'Missing token', code: 'missing_token' } });
+    return res.status(401).json({
+      error: {
+        message: 'You didn\'t provide an API key. You need to provide your API key in an Authorization header using Bearer auth.',
+        type: 'invalid_request_error',
+        param: null,
+        code: 'missing_api_key'
+      }
+    });
   }
 
   if (token === 'sk-qqlcx5') {
@@ -293,7 +300,14 @@ const authenticateToken = async (req, res, next) => {
         realToken = await loginAndGetToken();
         userTokenStore.set('default_user', realToken);
       } catch (error) {
-        return res.status(401).json({ error: { message: '自动登录失败', code: 'login_failed' } });
+        return res.status(401).json({
+          error: {
+            message: 'Incorrect API key provided. Auto login failed.',
+            type: 'invalid_request_error',
+            param: null,
+            code: 'invalid_api_key'
+          }
+        });
       }
     }
     req.mossToken = realToken;
@@ -306,11 +320,22 @@ const authenticateToken = async (req, res, next) => {
 const getVersionFromModel = (model) => model?.includes('-tmp') ? '2' : '1';
 
 /**
- * 统一发送系统消息（适配流式/非流式）
+ * 生成 system_fingerprint（模拟 OpenAI 格式）
+ */
+const generateFingerprint = () => `fp_${crypto.randomBytes(6).toString('hex')}`;
+
+/**
+ * 估算 token 数量（简单实现：约4字符=1 token）
+ */
+const estimateTokens = (text) => Math.ceil((text || '').length / 4);
+
+/**
+ * 统一发送系统消息（适配流式/非流式）- OpenAI 兼容格式
  */
 const sendSystemMessage = (res, content, isStream, model, requestId) => {
   const timestamp = Math.floor(Date.now() / 1000);
   const id = `chatcmpl-${requestId}`;
+  const systemFingerprint = generateFingerprint();
 
   if (isStream) {
     res.writeHead(200, {
@@ -319,31 +344,61 @@ const sendSystemMessage = (res, content, isStream, model, requestId) => {
       'Connection': 'keep-alive',
       'X-Request-ID': requestId
     });
-    const chunk = {
+
+    // 发送内容 chunk
+    const contentChunk = {
       id,
       object: 'chat.completion.chunk',
       created: timestamp,
       model: model,
+      system_fingerprint: systemFingerprint,
       choices: [{
         index: 0,
         delta: { role: 'assistant', content },
+        logprobs: null,
         finish_reason: null
       }]
     };
-    res.write(`data: ${JSON.stringify(chunk)}\n\n`);
+    res.write(`data: ${JSON.stringify(contentChunk)}\n\n`);
+
+    // 发送结束 chunk（带 finish_reason）
+    const endChunk = {
+      id,
+      object: 'chat.completion.chunk',
+      created: timestamp,
+      model: model,
+      system_fingerprint: systemFingerprint,
+      choices: [{
+        index: 0,
+        delta: {},
+        logprobs: null,
+        finish_reason: 'stop'
+      }]
+    };
+    res.write(`data: ${JSON.stringify(endChunk)}\n\n`);
     res.write('data: [DONE]\n\n');
     res.end();
   } else {
+    const promptTokens = 10; // 系统消息通常 prompt 很短
+    const completionTokens = estimateTokens(content);
+
     res.json({
       id,
       object: 'chat.completion',
       created: timestamp,
       model: model,
+      system_fingerprint: systemFingerprint,
       choices: [{
+        index: 0,
         message: { role: 'assistant', content },
-        finish_reason: 'stop',
-        index: 0
-      }]
+        logprobs: null,
+        finish_reason: 'stop'
+      }],
+      usage: {
+        prompt_tokens: promptTokens,
+        completion_tokens: completionTokens,
+        total_tokens: promptTokens + completionTokens
+      }
     });
   }
 };
@@ -378,8 +433,18 @@ const createNewConversation = async (token, model) => {
 };
 
 // 辅助函数：判断是否需要重置/重登/免费时间 (逻辑保持不变，为节省篇幅略简写)
-const shouldResetConversation = (msgs) => ['重置', 'reset', '1'].includes(msgs?.[msgs.length-1]?.content?.trim());
-const shouldRelogin = (msgs) => ['重新登录', 'login', '登录'].includes(msgs?.[msgs.length-1]?.content?.trim()?.toLowerCase());
+const shouldResetConversation = (msgs) => {
+  const lastMsg = msgs?.[msgs.length - 1];
+  if (!lastMsg) return false;
+  const content = formatMessageContent(lastMsg.content);
+  return ['重置', 'reset', '1'].includes(content?.trim());
+};
+const shouldRelogin = (msgs) => {
+  const lastMsg = msgs?.[msgs.length - 1];
+  if (!lastMsg) return false;
+  const content = formatMessageContent(lastMsg.content);
+  return ['重新登录', 'login', '登录'].includes(content?.trim()?.toLowerCase());
+};
 const isFreeTime = () => {
   const now = new Date();
   const utc = now.getTime() + (now.getTimezoneOffset() * 60000);
@@ -392,15 +457,237 @@ const isFreeTime = () => {
   };
 };
 
-// 格式转换函数 (保持原有逻辑，去除无用的大量日志)
+/**
+ * 从 JSON 字符串中提取平衡的 JSON 对象
+ */
+const extractBalancedJson = (str, startIdx) => {
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+  let start = -1;
+
+  for (let i = startIdx; i < str.length; i++) {
+    const char = str[i];
+
+    if (escape) {
+      escape = false;
+      continue;
+    }
+
+    if (char === '\\') {
+      escape = true;
+      continue;
+    }
+
+    if (char === '"' && !escape) {
+      inString = !inString;
+      continue;
+    }
+
+    if (inString) continue;
+
+    if (char === '{') {
+      if (depth === 0) start = i;
+      depth++;
+    } else if (char === '}') {
+      depth--;
+      if (depth === 0 && start !== -1) {
+        return str.substring(start, i + 1);
+      }
+    }
+  }
+  return null;
+};
+
+/**
+ * 从模型响应中解析工具调用
+ * 支持多种格式：JSON代码块、直接JSON对象等
+ */
+const parseToolCalls = (content) => {
+  if (!content || typeof content !== 'string') return null;
+
+  // 记录解析尝试（用于调试）
+  Logger.info('尝试解析工具调用', { contentLength: content.length, contentPreview: content.substring(0, 200) });
+
+  // 方法1: 查找 "tool_calls" 关键字并提取完整 JSON
+  const toolCallsIdx = content.indexOf('"tool_calls"');
+  if (toolCallsIdx !== -1) {
+    // 向前查找 { 的位置
+    let startIdx = toolCallsIdx;
+    while (startIdx > 0 && content[startIdx] !== '{') startIdx--;
+
+    if (content[startIdx] === '{') {
+      const jsonStr = extractBalancedJson(content, startIdx);
+      if (jsonStr) {
+        try {
+          const parsed = JSON.parse(jsonStr);
+          if (parsed.tool_calls && Array.isArray(parsed.tool_calls)) {
+            Logger.info('成功解析 tool_calls JSON', { count: parsed.tool_calls.length });
+            return parsed.tool_calls.map(tc => ({
+              id: tc.id || `call_${crypto.randomBytes(12).toString('hex')}`,
+              type: tc.type || 'function',
+              function: {
+                name: tc.function?.name || tc.name,
+                arguments: typeof tc.function?.arguments === 'string'
+                  ? tc.function.arguments
+                  : JSON.stringify(tc.function?.arguments || tc.arguments || {})
+              }
+            }));
+          }
+        } catch (e) {
+          Logger.warn('解析 tool_calls JSON 失败', { error: e.message, jsonStr: jsonStr.substring(0, 500) });
+        }
+      }
+    }
+  }
+
+  // 方法2: 匹配代码块中的 JSON
+  const codeBlockMatch = content.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (codeBlockMatch) {
+    try {
+      const parsed = JSON.parse(codeBlockMatch[1].trim());
+      if (parsed.tool_calls && Array.isArray(parsed.tool_calls)) {
+        Logger.info('从代码块解析 tool_calls', { count: parsed.tool_calls.length });
+        return parsed.tool_calls.map(tc => ({
+          id: tc.id || `call_${crypto.randomBytes(12).toString('hex')}`,
+          type: tc.type || 'function',
+          function: {
+            name: tc.function?.name || tc.name,
+            arguments: typeof tc.function?.arguments === 'string'
+              ? tc.function.arguments
+              : JSON.stringify(tc.function?.arguments || tc.arguments || {})
+          }
+        }));
+      }
+    } catch (e) {
+      // 代码块内容不是有效的 tool_calls JSON
+    }
+  }
+
+  // 方法3: 匹配单个函数调用格式 {"name": "...", "arguments": {...}}
+  const singleCallMatch = content.match(/\{\s*"name"\s*:\s*"([^"]+)"\s*,\s*"arguments"\s*:/);
+  if (singleCallMatch) {
+    const startIdx = content.indexOf(singleCallMatch[0]);
+    const jsonStr = extractBalancedJson(content, startIdx);
+    if (jsonStr) {
+      try {
+        const parsed = JSON.parse(jsonStr);
+        Logger.info('解析单个函数调用', { name: parsed.name });
+        return [{
+          id: `call_${crypto.randomBytes(12).toString('hex')}`,
+          type: 'function',
+          function: {
+            name: parsed.name,
+            arguments: typeof parsed.arguments === 'string'
+              ? parsed.arguments
+              : JSON.stringify(parsed.arguments || {})
+          }
+        }];
+      } catch (e) {
+        // 解析失败
+      }
+    }
+  }
+
+  Logger.info('未检测到工具调用');
+  return null;
+};
+
+/**
+ * 格式化消息内容（处理多模态内容）
+ */
+const formatMessageContent = (content) => {
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    return content
+      .filter(item => item.type === 'text')
+      .map(item => item.text)
+      .join('\n');
+  }
+  return '';
+};
+
+/**
+ * 将 tools 定义转换为提示词（用于不原生支持 function calling 的后端）
+ */
+const toolsToPrompt = (tools) => {
+  if (!tools || !Array.isArray(tools) || tools.length === 0) return '';
+
+  const toolDescriptions = tools.map(tool => {
+    if (tool.type === 'function' && tool.function) {
+      const fn = tool.function;
+      const params = fn.parameters?.properties
+        ? Object.entries(fn.parameters.properties).map(([name, prop]) =>
+            `  - ${name}${fn.parameters.required?.includes(name) ? ' (required)' : ''}: ${prop.description || prop.type}`
+          ).join('\n')
+        : '';
+      return `### ${fn.name}\n${fn.description || ''}\nParameters:\n${params}`;
+    }
+    return '';
+  }).filter(Boolean).join('\n\n');
+
+  return `
+# CRITICAL INSTRUCTIONS FOR TOOL USE
+
+You MUST use tools to complete tasks. DO NOT provide text explanations without using a tool.
+
+## How to Use Tools
+When you need to perform an action, respond with ONLY a JSON object in this exact format (no other text):
+
+{"tool_calls":[{"id":"call_${Date.now()}","type":"function","function":{"name":"TOOL_NAME","arguments":"{\\"param1\\":\\"value1\\"}"}}]}
+
+## Available Tools
+${toolDescriptions}
+
+## IMPORTANT RULES
+1. You MUST respond with the JSON format above when using a tool
+2. The "arguments" field MUST be a JSON string (with escaped quotes)
+3. DO NOT add any text before or after the JSON
+4. If you need to use a tool, use it immediately - do not ask for confirmation
+
+`;
+};
+
+/**
+ * 格式转换函数 - 支持完整的消息历史和 tools
+ */
 const convertToMossFormat = (reqBody, token, convId) => {
-  // ... (保持原有逻辑)
-  const userMsg = reqBody.messages.filter(m => m.role === 'user').pop();
+  const { messages, tools, tool_choice } = reqBody;
+
+  // 构建完整的 prompt，包含所有消息历史
+  let fullPrompt = '';
+
+  // 处理消息
+  for (const msg of messages) {
+    const content = formatMessageContent(msg.content);
+    if (msg.role === 'system') {
+      fullPrompt += `[System]: ${content}\n\n`;
+    } else if (msg.role === 'user') {
+      fullPrompt += `[User]: ${content}\n\n`;
+    } else if (msg.role === 'assistant') {
+      fullPrompt += `[Assistant]: ${content}\n\n`;
+    } else if (msg.role === 'tool') {
+      fullPrompt += `[Tool Result (${msg.tool_call_id})]: ${content}\n\n`;
+    }
+  }
+
+  // 如果有 tools，添加工具描述到 prompt
+  if (tools && tools.length > 0) {
+    // 在 prompt 开头添加工具信息
+    const toolsPrompt = toolsToPrompt(tools);
+    fullPrompt = toolsPrompt + fullPrompt;
+
+    // 如果 tool_choice 要求必须调用工具
+    if (tool_choice === 'required' || (tool_choice && tool_choice !== 'none' && tool_choice !== 'auto')) {
+      fullPrompt += '\n[Important]: You MUST use one of the available tools to respond. Do not provide a text response without using a tool.\n';
+    }
+  }
+
   return {
     url: 'https://jiangsu.codemoss.vip/luomacode-api/v3/moss/completions',
     headers: { 'content-type': 'application/json', 'token': token },
     body: JSON.stringify({
-      prompt: userMsg ? userMsg.content : '',
+      prompt: fullPrompt.trim(),
       options: {
         conversationId: convId,
         openaiVersion: reqBody.model.replace('-tmp', '') || 'gpt-4o-mini',
@@ -476,6 +763,15 @@ app.post('/v1/chat/completions', authenticateToken, asyncHandler(async (req, res
     throw new Error(`Moss API Error: ${response.status}`);
   }
 
+  // OpenAI 兼容格式的公共字段
+  const responseId = `chatcmpl-${requestId}`;
+  const systemFingerprint = generateFingerprint();
+  const created = Math.floor(Date.now() / 1000);
+
+  // 计算 prompt tokens（简单估算）
+  const promptText = messages.map(m => m.content || '').join(' ');
+  const promptTokens = estimateTokens(promptText);
+
   if (stream) {
     res.writeHead(200, {
       'Content-Type': 'text/event-stream',
@@ -486,6 +782,127 @@ app.post('/v1/chat/completions', authenticateToken, asyncHandler(async (req, res
 
     const reader = response.body;
     let buffer = '';
+    let fullContent = ''; // 累积完整响应内容
+    let isFirstChunk = true;
+    let sentContent = ''; // 已发送给客户端的内容
+    let isToolCallMode = false; // 是否检测到工具调用模式
+    let toolCallBuffer = ''; // 缓冲工具调用内容
+
+    /**
+     * 检测内容是否像工具调用的开头
+     */
+    const looksLikeToolCall = (content) => {
+      const trimmed = content.trim();
+      // 检测 {"tool_calls": 或 {"name": 格式
+      return trimmed.startsWith('{"tool_calls"') ||
+             trimmed.startsWith('{"name"') ||
+             trimmed.startsWith('```json\n{"tool_calls"') ||
+             trimmed.startsWith('```\n{"tool_calls"');
+    };
+
+    /**
+     * 发送文本内容 chunk
+     */
+    const sendContentChunk = (content) => {
+      if (!content || res.writableEnded) return;
+
+      const streamData = {
+        id: responseId,
+        object: 'chat.completion.chunk',
+        created,
+        model: model,
+        system_fingerprint: systemFingerprint,
+        choices: [{
+          index: 0,
+          delta: isFirstChunk ? { role: 'assistant', content } : { content },
+          logprobs: null,
+          finish_reason: null
+        }]
+      };
+      res.write(`data: ${JSON.stringify(streamData)}\n\n`);
+      isFirstChunk = false;
+      sentContent += content;
+    };
+
+    /**
+     * 发送工具调用（OpenAI 流式格式）
+     */
+    const sendToolCallsStream = (toolCalls) => {
+      if (!toolCalls || toolCalls.length === 0 || res.writableEnded) return;
+
+      // 按照 OpenAI 流式格式，需要分多个 chunk 发送
+      // 第一个 chunk：发送 role 和 tool_calls 的基本信息
+      for (let idx = 0; idx < toolCalls.length; idx++) {
+        const tc = toolCalls[idx];
+
+        // 发送工具调用的开始（id, type, function.name）
+        const startChunk = {
+          id: responseId,
+          object: 'chat.completion.chunk',
+          created,
+          model: model,
+          system_fingerprint: systemFingerprint,
+          choices: [{
+            index: 0,
+            delta: isFirstChunk ? {
+              role: 'assistant',
+              content: null,
+              tool_calls: [{
+                index: idx,
+                id: tc.id,
+                type: tc.type,
+                function: {
+                  name: tc.function.name,
+                  arguments: ''
+                }
+              }]
+            } : {
+              tool_calls: [{
+                index: idx,
+                id: tc.id,
+                type: tc.type,
+                function: {
+                  name: tc.function.name,
+                  arguments: ''
+                }
+              }]
+            },
+            logprobs: null,
+            finish_reason: null
+          }]
+        };
+        res.write(`data: ${JSON.stringify(startChunk)}\n\n`);
+        isFirstChunk = false;
+
+        // 分块发送 arguments（模拟流式输出）
+        const args = tc.function.arguments || '{}';
+        const chunkSize = 50; // 每次发送50个字符
+        for (let i = 0; i < args.length; i += chunkSize) {
+          const argChunk = args.substring(i, Math.min(i + chunkSize, args.length));
+          const argsChunkData = {
+            id: responseId,
+            object: 'chat.completion.chunk',
+            created,
+            model: model,
+            system_fingerprint: systemFingerprint,
+            choices: [{
+              index: 0,
+              delta: {
+                tool_calls: [{
+                  index: idx,
+                  function: {
+                    arguments: argChunk
+                  }
+                }]
+              },
+              logprobs: null,
+              finish_reason: null
+            }]
+          };
+          res.write(`data: ${JSON.stringify(argsChunkData)}\n\n`);
+        }
+      }
+    };
 
     reader.on('data', (chunk) => {
       // 检查客户端是否还在连接
@@ -504,21 +921,43 @@ app.post('/v1/chat/completions', authenticateToken, asyncHandler(async (req, res
           const parsed = JSON.parse(line);
           // 错误处理
           if (typeof parsed?.code === 'number' && parsed.code !== 0) {
-            const errChunk = { choices: [{ delta: { content: `Error: ${parsed.msg}` } }] };
+            const errChunk = {
+              id: responseId,
+              object: 'chat.completion.chunk',
+              created,
+              model: model,
+              system_fingerprint: systemFingerprint,
+              choices: [{
+                index: 0,
+                delta: { content: `Error: ${parsed.msg}` },
+                logprobs: null,
+                finish_reason: null
+              }]
+            };
             res.write(`data: ${JSON.stringify(errChunk)}\n\n`);
             continue;
           }
 
           const content = parsed?.msgItem?.theContent || '';
           if (content) {
-            const streamData = {
-              id: `chatcmpl-${requestId}`,
-              object: 'chat.completion.chunk',
-              created: Math.floor(Date.now() / 1000),
-              model: model,
-              choices: [{ delta: { content }, index: 0, finish_reason: null }]
-            };
-            res.write(`data: ${JSON.stringify(streamData)}\n\n`);
+            fullContent += content;
+
+            // 检测是否是工具调用模式
+            if (!isToolCallMode && sentContent.length === 0) {
+              // 还没发送任何内容，检查累积的内容是否像工具调用
+              if (looksLikeToolCall(fullContent)) {
+                isToolCallMode = true;
+                Logger.info('检测到工具调用模式，开始缓冲', { contentPreview: fullContent.substring(0, 100) });
+              }
+            }
+
+            if (isToolCallMode) {
+              // 工具调用模式：缓冲内容，不直接发送
+              toolCallBuffer = fullContent;
+            } else {
+              // 普通文本模式：直接发送
+              sendContentChunk(content);
+            }
           }
         } catch (e) {
           // 忽略解析错误
@@ -528,6 +967,58 @@ app.post('/v1/chat/completions', authenticateToken, asyncHandler(async (req, res
 
     reader.on('end', () => {
       if (!res.writableEnded) {
+        // 检测完整内容是否包含工具调用
+        const toolCalls = parseToolCalls(fullContent);
+
+        if (toolCalls && toolCalls.length > 0) {
+          Logger.info('解析到工具调用，准备发送', { count: toolCalls.length });
+
+          // 如果之前是工具调用模式，内容还没发送，现在以正确格式发送
+          // 如果之前不是工具调用模式但检测到了工具调用，说明工具调用混在文本中
+          // 无论哪种情况，都发送工具调用
+
+          // 发送工具调用
+          sendToolCallsStream(toolCalls);
+
+          // 发送结束 chunk（带 finish_reason: tool_calls）
+          const endChunk = {
+            id: responseId,
+            object: 'chat.completion.chunk',
+            created,
+            model: model,
+            system_fingerprint: systemFingerprint,
+            choices: [{
+              index: 0,
+              delta: {},
+              logprobs: null,
+              finish_reason: 'tool_calls'
+            }]
+          };
+          res.write(`data: ${JSON.stringify(endChunk)}\n\n`);
+        } else {
+          // 如果是工具调用模式但解析失败，需要把缓冲的内容作为普通文本发送
+          if (isToolCallMode && toolCallBuffer) {
+            Logger.warn('工具调用解析失败，作为普通文本发送', { contentLength: toolCallBuffer.length });
+            sendContentChunk(toolCallBuffer);
+          }
+
+          // 发送结束 chunk（带 finish_reason: stop）- OpenAI 标准格式
+          const endChunk = {
+            id: responseId,
+            object: 'chat.completion.chunk',
+            created,
+            model: model,
+            system_fingerprint: systemFingerprint,
+            choices: [{
+              index: 0,
+              delta: {},
+              logprobs: null,
+              finish_reason: 'stop'
+            }]
+          };
+          res.write(`data: ${JSON.stringify(endChunk)}\n\n`);
+        }
+
         res.write('data: [DONE]\n\n');
         res.end();
       }
@@ -542,27 +1033,131 @@ app.post('/v1/chat/completions', authenticateToken, asyncHandler(async (req, res
 
   } else {
     const data = await response.json();
+    const content = data.content || data.text || '';
+    const completionTokens = estimateTokens(content);
+
+    // 检测是否包含工具调用
+    const toolCalls = parseToolCalls(content);
+
+    // 构建消息对象
+    const message = { role: 'assistant' };
+
+    if (toolCalls && toolCalls.length > 0) {
+      // 如果检测到工具调用，设置 tool_calls 并清空 content
+      message.content = null;
+      message.tool_calls = toolCalls;
+    } else {
+      message.content = content;
+    }
+
+    // OpenAI 兼容的非流式响应格式
     const openaiResp = {
-      id: `chatcmpl-${requestId}`,
+      id: responseId,
       object: 'chat.completion',
-      created: Math.floor(Date.now() / 1000),
+      created,
       model: model,
+      system_fingerprint: systemFingerprint,
       choices: [{
-        message: { role: 'assistant', content: data.content || data.text || '' },
-        finish_reason: 'stop',
-        index: 0
-      }]
+        index: 0,
+        message,
+        logprobs: null,
+        finish_reason: toolCalls ? 'tool_calls' : 'stop'
+      }],
+      usage: {
+        prompt_tokens: promptTokens,
+        completion_tokens: completionTokens,
+        total_tokens: promptTokens + completionTokens
+      }
     };
     res.json(openaiResp);
   }
 }));
+
+// ==========================================
+// OpenAI 兼容端点
+// ==========================================
+
+/**
+ * 获取可用模型列表 - OpenAI /v1/models 兼容
+ */
+app.get('/v1/models', (req, res) => {
+  const models = [
+    // 初级模型
+    { id: 'gpt-4o-mini', owned_by: 'openai', created: 1686935002 },
+    { id: '3.5-16k', owned_by: 'openai', created: 1686935002 },
+    // 中级模型
+    { id: 'moonshot-v1-8k', owned_by: 'moonshot', created: 1686935002 },
+    // 增强模型
+    { id: 'gpt-4o-2024-05-13', owned_by: 'openai', created: 1686935002 },
+    { id: '4.0', owned_by: 'openai', created: 1686935002 },
+    { id: 'deepseek-chat', owned_by: 'deepseek', created: 1686935002 },
+    { id: 'gemini-pro', owned_by: 'google', created: 1686935002 },
+    { id: 'ERNIE-Bot-4', owned_by: 'baidu', created: 1686935002 },
+    { id: 'chatglm_pro', owned_by: 'zhipu', created: 1686935002 },
+    { id: 'qwen-plus-v1', owned_by: 'alibaba', created: 1686935002 },
+    { id: 'SparkDesk', owned_by: 'iflytek', created: 1686935002 },
+    // 高级模型
+    { id: 'o1-preview', owned_by: 'openai', created: 1686935002 },
+    { id: 'Pro/deepseek-ai/DeepSeek-R1', owned_by: 'deepseek', created: 1686935002 },
+    { id: 'claude-sonnet-4-20250514', owned_by: 'anthropic', created: 1686935002 },
+    // 其他模型
+    { id: 'gpt-4o-image', owned_by: 'openai', created: 1686935002 }
+  ];
+
+  res.json({
+    object: 'list',
+    data: models.map(m => ({
+      id: m.id,
+      object: 'model',
+      created: m.created,
+      owned_by: m.owned_by,
+      permission: [],
+      root: m.id,
+      parent: null
+    }))
+  });
+});
+
+/**
+ * 获取单个模型信息 - OpenAI /v1/models/:model 兼容
+ */
+app.get('/v1/models/:model', (req, res) => {
+  const modelId = req.params.model;
+  const knownModels = [
+    'gpt-4o-mini', '3.5-16k', 'moonshot-v1-8k', 'gpt-4o-2024-05-13', '4.0',
+    'deepseek-chat', 'gemini-pro', 'ERNIE-Bot-4', 'chatglm_pro', 'qwen-plus-v1',
+    'SparkDesk', 'o1-preview', 'Pro/deepseek-ai/DeepSeek-R1',
+    'claude-sonnet-4-20250514', 'gpt-4o-image'
+  ];
+
+  if (!knownModels.includes(modelId)) {
+    return res.status(404).json({
+      error: {
+        message: `The model '${modelId}' does not exist`,
+        type: 'invalid_request_error',
+        param: 'model',
+        code: 'model_not_found'
+      }
+    });
+  }
+
+  res.json({
+    id: modelId,
+    object: 'model',
+    created: 1686935002,
+    owned_by: 'codemoss',
+    permission: [],
+    root: modelId,
+    parent: null
+  });
+});
 
 // 健康检查
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', memory: process.memoryUsage(), connections: server.getConnections ? "available" : "unknown" });
 });
 
-// 全局错误处理
+// 全局错误处理 - OpenAI 兼容格式
 app.use((err, req, res, next) => {
   const requestId = req.requestId || 'unknown';
   if (err.name === 'AbortError') {
@@ -571,7 +1166,18 @@ app.use((err, req, res, next) => {
   }
   Logger.error(`API Error`, err);
   if (!res.headersSent) {
-    res.status(500).json({ error: { message: err.message || 'Internal Error', type: 'server_error' } });
+    // OpenAI 兼容的错误响应格式
+    const statusCode = err.statusCode || 500;
+    const errorType = statusCode >= 500 ? 'server_error' : 'invalid_request_error';
+
+    res.status(statusCode).json({
+      error: {
+        message: err.message || 'An unexpected error occurred',
+        type: errorType,
+        param: err.param || null,
+        code: err.code || (statusCode >= 500 ? 'internal_error' : 'invalid_request')
+      }
+    });
   }
 });
 
