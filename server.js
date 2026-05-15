@@ -246,7 +246,7 @@ const fetchClient = async (url, options = {}, timeout = 30000) => {
 // 登录获取token的函数
 const loginAndGetToken = async () => {
   try {
-    const response = await fetchClient('https://jiangsu.codemoss.vip/luomacode-api/user/login', {
+    const response = await fetchClient('https://apicn.aihao123.cn/luomacode-api/user/login', {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
@@ -406,7 +406,7 @@ const sendSystemMessage = (res, content, isStream, model, requestId) => {
 // 创建新会话
 const createNewConversation = async (token, model) => {
   try {
-    const response = await fetchClient('https://jiangsu.codemoss.vip/luomacode-api/conversation', {
+    const response = await fetchClient('https://apicn.aihao123.cn/luomacode-api/conversation', {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
@@ -684,7 +684,7 @@ const convertToMossFormat = (reqBody, token, convId) => {
   }
 
   return {
-    url: 'https://jiangsu.codemoss.vip/luomacode-api/v3/moss/completions',
+    url: 'https://apicn.aihao123.cn/luomacode-api/v3/moss/completions',
     headers: { 'content-type': 'application/json', 'token': token },
     body: JSON.stringify({
       prompt: fullPrompt.trim(),
