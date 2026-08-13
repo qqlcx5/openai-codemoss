@@ -7,7 +7,7 @@ const response = await fetch("http://66.154.117.189:8002/v1/chat/completions", {
   body: JSON.stringify({
     model: "gpt-4o-mini-tmp",
     messages: [
-      { role: "user", content: "请求发生错误: 客户端 API Key 无效" }
+      { role: "user", content: "1" }
     ],
     stream: true
   })

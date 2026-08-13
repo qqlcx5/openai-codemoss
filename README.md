@@ -138,7 +138,7 @@ Content-Type: application/json
 ## 注意事项
 
 1. 确保moss token有效且有足够的配额
-2. 服务器需要能够访问 `apicn.aihao123.cn`
+2. 服务器需要能够访问 `api.aihao123.cn`
 3. 建议在生产环境中使用HTTPS
 4. 可以通过环境变量调整CORS设置
 
